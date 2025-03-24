@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multiplayer Game</title>
+    <style>
+        body {
+            margin: 0;
+            background: black;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            border: 2px solid white;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+    </style>
+</head>
+<body>
+<h1>Astro Dash</h1>
+<canvas id="gameCanvas" width="800" height="600"></canvas>
+<script>
+    const WIDTH = 800;
+    const HEIGHT = 600;
+    const TPS = 30;
+    const TICK_RATE = 1000 / TPS; // 33.33 milliseconds per tick
+
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    class Server {
+        #socket = undefined;
+        #log = undefined;
+        #id = undefined;
+        #onEventFn = undefined;
+
+        constructor(url, log) {
+            this.#log = log;
+            this.#socket = new WebSocket(url);
+        }
+
+        setOnEventFn(onEventFn) {
+            this.#onEventFn = onEventFn;
+        }
+
+        init() {
+            return new Promise(resolve => {
+                this.#socket.onopen = () => this.send('subscribe');
+
+                let helloSendTime;
+
+                this.#socket.onmessage = event => {
+                    const e = JSON.parse(event.data);
+
+                    if (e.type === 'confirm_subscription') {
+                        helloSendTime = performance.now();
+                        this.send('message', { type: "hello" });
+                    }
+
+                    if (e.message && e.message.type === 'hello') {
+                        this.#id = e.message.id;
+                        const rtt = performance.now() - helloSendTime;
+                        const transportTime = rtt / 2;
+                        const extraTicks = transportTime / TICK_RATE; // add time delay from server to client
+                        e.message.ticks += extraTicks;
+                        log.add(`Hello received from server after ${rtt.toFixed(2)} ms`);
+                        log.add(`Local ship ID is ${e.message.id}`);
+                        log.add(`Added ${extraTicks.toFixed(2)} extra ticks for transit time`);
+                        resolve(e.message);
+                    }
+
+                    if (e.message && e.message.type === 'event') {
+                        if (this.#onEventFn && e.message.id !== this.#id) {
+                            this.#onEventFn(e.message);
+                        }
+                    }
+                };
+            });
+        }
+
+        send(command, data) {
+            const msg = {
+                command: command,
+                identifier: JSON.stringify({channel: "GameChannel"})
+            };
+            if (data) {
+                msg['data'] = JSON.stringify(data);
+            }
+            this.#socket.send(JSON.stringify(msg));
+        }
+
+        sendEvent(event) {
+            this.send('message', {type: "event", event});
+        }
+    }
+
+    class Range {
+        #min = undefined;
+        #max = undefined;
+
+        constructor(min, max) {
+            this.#min = min;
+            this.#max = max;
+        }
+
+        has(val) {
+            return val >= this.#min && val <= this.#max;
+        }
+    }
+
+    class Keys {
+        static THRUST = 0;
+        static LEFT = 1;
+        static RIGHT = 2;
+
+        static BINDINGS = [
+            ['w', 'ArrowUp'],
+            ['a', 'ArrowLeft'],
+            ['d', 'ArrowRight']
+        ];
+
+        #keyDownTimes = [Number.MAX_VALUE, Number.MAX_VALUE, Number.MAX_VALUE];
+        #keyUpTimes = [0, 0, 0];
+
+        constructor(clock) {
+            document.addEventListener("keydown", e => {
+                for (let i = Keys.THRUST; i <= Keys.RIGHT; i++) {
+                    if (Keys.BINDINGS[i].includes(e.key)) {
+                        this.#keyDownTimes[i] = clock.ticksAt(performance.now());
+                        this.#keyUpTimes[i] = Number.MAX_VALUE;
+                    }
+                }
+            });
+            document.addEventListener("keyup", e => {
+                for (let i = Keys.THRUST; i <= Keys.RIGHT; i++) {
+                    if (Keys.BINDINGS[i].includes(e.key)) {
+                        this.#keyUpTimes[i] = clock.ticksAt(performance.now());
+                    }
+                }
+            });
+        }
+
+        inputTimeRange(type) {
+            return new Range(this.#keyDownTimes[type], this.#keyUpTimes[type]);
+        }
+
+        thrustTimes() {
+            return this.inputTimeRange(Keys.THRUST);
+        }
+
+        leftTurnTimes() {
+            return this.inputTimeRange(Keys.LEFT);
+        }
+
+        rightTurnTimes() {
+            return this.inputTimeRange(Keys.RIGHT);
+        }
+    }
+
+    class Starfield {
+        #stars = []
+
+        constructor(count) {
+            this.generate(count);
+        }
+
+        generate(count) {
+            for (let i = 0; i < count; i++) {
+                const x = Math.random() * WIDTH;
+                const y = Math.random() * HEIGHT;
+                const radius = Math.random() * 1.5 + 0.5;
+                this.#stars.push([x, y, radius]);
+            }
+        }
+
+        draw() {
+            for (const arr of this.#stars) {
+                const [x, y, radius] = arr;
+                ctx.beginPath();
+                ctx.arc(x, y, radius, 0, 2 * Math.PI);
+                ctx.fillStyle = 'white';
+                ctx.fill();
+            }
+        }
+    }
+
+    class Clock {
+        #epochTime = undefined;
+        #epochTicks = undefined;
+
+        constructor(epochTicks) {
+            this.#epochTime = performance.now();
+            this.#epochTicks = epochTicks;
+        }
+
+        ticksAt(timestamp) {
+            return this.#epochTicks + Math.floor((timestamp - this.#epochTime) / TICK_RATE);
+        }
+    }
+
+    class Ship {
+        static MAX_VEL_VEC_SQUARED = 80;
+        static MIN_VEL_VEC_SQUARED = 0.1;
+        static THRUST_ACCEL_VECTOR = 4.0;
+        static MAX_ROTATION_VEL = Math.PI / 20;
+        static MIN_ROTATION_VEL = 0.005;
+        static ROTATION_ACCEL = Math.PI / 80;
+        static DECEL = 0.95;
+        static THRUST_EFFECT_PERIOD = 200 / TPS;
+        static SIZE = 32;
+
+        #x = 0;
+        #y = 0;
+        #vx = 0;
+        #vy = 0;
+        #r = 0;
+        #vr = 0;
+
+        #clock = undefined;
+        #lastUpdateTicks = 0;
+
+        #lastThrustTicks = undefined;
+        #lastLeftTurnTicks = undefined;
+        #lastRightTurnTicks = undefined;
+
+        #server = undefined;
+
+        constructor(x, y, server, clock) {
+            this.#x = x;
+            this.#y = y;
+            this.#server = server;
+            this.#clock = clock;
+        }
+
+        thrust(ticks) {
+            if (this.#vx * this.#vx + this.#vy * this.#vy < Ship.MAX_VEL_VEC_SQUARED) {
+                const rads = this.#r - (Math.PI / 2); // game rotation radius of 0 (east) is actually -PI/2 (north)
+                this.#vx += Ship.THRUST_ACCEL_VECTOR * Math.cos(rads);
+                this.#vy += Ship.THRUST_ACCEL_VECTOR * Math.sin(rads);
+                this.#lastThrustTicks = ticks;
+            }
+        }
+
+        turnLeft(ticks) {
+            if (this.#vr > -Ship.MAX_ROTATION_VEL) {
+                this.#vr -= Ship.ROTATION_ACCEL;
+                this.#lastLeftTurnTicks = ticks;
+            }
+        }
+
+        turnRight(ticks) {
+            if (this.#vr < Ship.MAX_ROTATION_VEL) {
+                this.#vr += Ship.ROTATION_ACCEL;
+                this.#lastRightTurnTicks = ticks;
+            }
+        }
+
+        ticksSinceLastUpdate(timestamp) {
+            return this.#clock.ticksAt(timestamp) - this.#lastUpdateTicks;
+        }
+
+        update(timestamp, keys) {
+            const elapsed = this.ticksSinceLastUpdate(timestamp);
+            const thrustTicks = keys.thrustTimes();
+            const leftTurnTicks = keys.leftTurnTimes();
+            const rightTurnTicks = keys.rightTurnTimes();
+            let event;
+            for (let i = 0; i < elapsed; i++) {
+                const t = this.#lastUpdateTicks + i;
+                const [thrust, leftTurn, rightTurn] = [thrustTicks.has(t), leftTurnTicks.has(t), rightTurnTicks.has(t)];
+                this.tick(t, thrust, leftTurn, rightTurn);
+                if (thrust || leftTurn || rightTurn) {
+                    event = {
+                        t: t,
+                        x: this.#x,
+                        y: this.#y,
+                        r: this.#r,
+                        vx: this.#vx,
+                        vy: this.#vy,
+                        vr: this.#vr,
+                        ltt: this.#lastThrustTicks,
+                        lltt: this.#lastLeftTurnTicks,
+                        lrtt: this.#lastRightTurnTicks,
+                    }
+                }
+            }
+            this.#lastUpdateTicks += elapsed;
+            if (event) {
+                this.#server.sendEvent(event);
+            }
+        }
+
+        updateFromEvent(timestamp, event) {
+            if (event) {
+                this.#lastUpdateTicks = event.t;
+                this.#x = event.x;
+                this.#y = event.y;
+                this.#r = event.r;
+                this.#vx = event.vx;
+                this.#vy = event.vy;
+                this.#vr = event.vr;
+                this.#lastThrustTicks = event.ltt;
+                this.#lastLeftTurnTicks = event.lltt;
+                this.#lastRightTurnTicks = event.lrtt;
+            }
+            const elapsed = this.ticksSinceLastUpdate(timestamp);
+            for (let i = 0; i < elapsed; i++) {
+                this.tick(timestamp, false, false, false);
+            }
+            this.#lastUpdateTicks += elapsed;
+        }
+
+        tick(ticks, thrust, leftTurn, rightTurn) {
+            if (thrust) {
+                this.thrust(ticks);
+            }
+            if (leftTurn) {
+                this.turnLeft(ticks);
+            }
+            if (rightTurn) {
+                this.turnRight(ticks);
+            }
+            this.#vx *= Ship.DECEL;
+            this.#vy *= Ship.DECEL;
+            this.#vr *= Ship.DECEL;
+            if (this.#vx * this.#vx + this.#vy * this.#vy < Ship.MIN_VEL_VEC_SQUARED) {
+                this.#vx = 0;
+                this.#vy = 0;
+            }
+            if (Math.abs(this.#vr) < Ship.MIN_ROTATION_VEL) {
+                this.#vr = 0;
+            }
+            this.#x += this.#vx;
+            this.#y += this.#vy;
+            this.#r += this.#vr;
+            if (this.#x < 0) {
+                this.#x += WIDTH;
+            }
+            if (this.#x > WIDTH) {
+                this.#x -= WIDTH;
+            }
+            if (this.#y < 0) {
+                this.#y += HEIGHT;
+            }
+            if (this.#y > HEIGHT) {
+                this.#y -= HEIGHT;
+            }
+        }
+
+        drawShip() {
+            ctx.beginPath();
+            ctx.moveTo(0, -Ship.SIZE / 2);  // Tip (Forward)
+            ctx.lineTo(Ship.SIZE / 2, Ship.SIZE / 2);  // Bottom-right
+            ctx.lineTo(-Ship.SIZE / 2, Ship.SIZE / 2); // Bottom-left
+            ctx.closePath();
+            ctx.fillStyle = "white"; // Ship color
+            ctx.fill();
+            ctx.strokeStyle = "gray"; // Outline
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        drawThrustFlame(timestamp) {
+            if (this.#lastThrustTicks && this.#clock.ticksAt(timestamp) - this.#lastThrustTicks < Ship.THRUST_EFFECT_PERIOD) {
+                ctx.beginPath();
+                ctx.moveTo(-Ship.SIZE / 3, Ship.SIZE / 2); // Left flame
+                ctx.lineTo(0, Ship.SIZE / 2 + (Math.random() * 15 + 15)); // Center flame (flickering effect)
+                ctx.lineTo(Ship.SIZE / 3, Ship.SIZE / 2); // Right flame
+                ctx.closePath();
+                ctx.fillStyle = "orange";
+                ctx.fill();
+                ctx.strokeStyle = "white";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+
+        drawLeftTurnFlame(timestamp) {
+            if (this.#lastLeftTurnTicks && this.#clock.ticksAt(timestamp) - this.#lastLeftTurnTicks < Ship.THRUST_EFFECT_PERIOD) {
+                ctx.beginPath();
+                ctx.moveTo(-Ship.SIZE / 2, Ship.SIZE / 2); // **Bottom-left corner** of ship (true base)
+                ctx.lineTo(-Ship.SIZE / 2 - (Math.random() * 20 + 20), Ship.SIZE / 2 + 3); // Extended flame outward
+                ctx.lineTo(-Ship.SIZE / 2, Ship.SIZE / 2 - 3); // Tapered end
+                ctx.closePath();
+                ctx.fillStyle = "orange";
+                ctx.fill();
+            }
+        }
+
+        drawRightTurnFlame(timestamp) {
+            if (this.#lastRightTurnTicks && this.#clock.ticksAt(timestamp) - this.#lastRightTurnTicks < Ship.THRUST_EFFECT_PERIOD) {
+                ctx.beginPath();
+                ctx.moveTo(Ship.SIZE / 2, Ship.SIZE / 2); // **Bottom-right corner** of ship (true base)
+                ctx.lineTo(Ship.SIZE / 2 + (Math.random() * 20 + 20), Ship.SIZE / 2 + 3); // Extended flame outward
+                ctx.lineTo(Ship.SIZE / 2, Ship.SIZE / 2 - 3); // Tapered end
+                ctx.closePath();
+                ctx.fillStyle = "orange";
+                ctx.fill();
+            }
+        }
+
+        draw(timestamp) {
+            ctx.save();
+            ctx.translate(this.#x, this.#y);
+            ctx.rotate(this.#r);
+            this.drawShip();
+            this.drawThrustFlame(timestamp);
+            this.drawLeftTurnFlame(timestamp);
+            this.drawRightTurnFlame(timestamp);
+            ctx.restore();
+        }
+    }
+
+    class Log {
+        #duration = undefined
+        #messages = []
+
+        constructor(duration) {
+            this.#duration = duration;
+        }
+
+        add(message) {
+            this.#messages.push({
+                t: performance.now(),
+                m: message
+            });
+        }
+
+        update(timestamp) {
+            this.#messages = this.#messages.filter(val => val.t + this.#duration > timestamp);
+        }
+
+        draw() {
+            ctx.font = '16px sans-serif';
+            ctx.fillStyle = 'white';
+            this.#messages.forEach((val, n) => {
+                ctx.fillText(`[${Math.floor(val.t)}] ${val.m}`, 30, 30 * (n + 1));
+            });
+        }
+    }
+
+    class GameLoop {
+        #objects = []
+
+        start() {
+            requestAnimationFrame(t => this.iteration(t));
+        }
+
+        add(update, draw) {
+            this.#objects.push({update, draw});
+        }
+
+        iteration(timestamp) {
+            for (const obj of this.#objects) {
+                obj.update(timestamp);
+            }
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            for (const obj of this.#objects) {
+                obj.draw(timestamp);
+            }
+            requestAnimationFrame(t => this.iteration(t));
+        }
+    }
+
+    class Peers {
+        #clock = undefined;
+        #log = undefined;
+        #idleTimeout = undefined;
+        #ships = {};
+
+        constructor(clock, log, idleTimeout) {
+            this.#clock = clock;
+            this.#log = log;
+            this.#idleTimeout = idleTimeout;
+        }
+
+        onEvent(e) {
+            let val = this.#ships[e.id];
+            if (!val) {
+                val = {
+                    id: e.id,
+                    ship: new Ship(e.event.x, e.event.y, null, this.#clock)
+                };
+                this.#ships[e.id] = val;
+                this.#log.add(`Added peer ship ${e.id}`)
+            }
+            val.lastEvent = e.event;
+            val.lastEventTime = performance.now();
+        }
+
+        update(timestamp) {
+            for (const val of Object.values(this.#ships)) {
+                if (val.lastEventTime + this.#idleTimeout < timestamp) {
+                    this.#log.add(`Removed idle peer ship ${val.id}`);
+                    delete this.#ships[val.id];
+                }
+            }
+            for (const val of Object.values(this.#ships)) {
+                val.ship.updateFromEvent(timestamp, val.lastEvent);
+                val.lastEvent = undefined;
+            }
+        }
+
+        draw(timestamp) {
+            for (const val of Object.values(this.#ships)) {
+                val.ship.draw(timestamp);
+            }
+        }
+    }
+
+    const starfield = new Starfield(200);
+    const log = new Log(5000);
+    const gameLoop = new GameLoop();
+    gameLoop.start();
+    gameLoop.add(() => {}, () => starfield.draw());
+    gameLoop.add(t => log.update(t), () => log.draw());
+
+    function start(server, nextTick) {
+        const clock = new Clock(nextTick);
+        const keys = new Keys(clock);
+        const ship = new Ship(WIDTH / 2, HEIGHT / 2, server, clock);
+        const peers = new Peers(clock, log, 5000);
+        server.setOnEventFn(e => peers.onEvent(e));
+        gameLoop.add(t => ship.update(t, keys), t => ship.draw(t));
+        gameLoop.add(t => peers.update(t), t => peers.draw(t));
+        log.add(`Started clock at ${nextTick} ticks`);
+    }
+
+    const server = new Server("ws://localhost:3000/cable", log);
+    server.init().then(e => {
+        const nextTick = Math.ceil(e.ticks);
+        const delay = (nextTick - e.ticks) * TICK_RATE;
+        setTimeout(() => start(server, nextTick), delay); // synchronize clock with server
+    });
+</script>
+</body>
+</html>
