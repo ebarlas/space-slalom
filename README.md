@@ -9,6 +9,20 @@ Try it out: http://spaceslalom.barlasgarden.com
 
 <img src="screenshot.png" alt="Slalom Screenshot" width="400">
 
+## Controls
+
+Desktop:
+
+- A, Left Arrow - left turn
+- D, Right Arrow - right turn
+- W, Up Arrow - thrust
+
+Mobile:
+
+- Touch left third - left turn
+- Touch middle third - thrust
+- Touch right third - right turn
+
 ## Project
 
 Space Slalom is a Ruby on Rails project created with the following:
