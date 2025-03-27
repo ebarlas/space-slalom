@@ -1,34 +1,31 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multiplayer Game</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Space Slalom</title>
     <style>
-        body {
+        html, body {
             margin: 0;
+            padding: 0;
             background: black;
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
             display: flex;
             justify-content: center;
             align-items: center;
-            height: 100vh;
-            width: 100vw;
-            overflow: hidden;
         }
 
         canvas {
             display: block;
             border: 2px solid white;
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+            image-rendering: pixelated;
         }
     </style>
 </head>
 <body>
-<h1>Astro Dash</h1>
-<canvas id="gameCanvas" width="800" height="600"></canvas>
+<canvas id="gameCanvas"></canvas>
 <script>
     const WIDTH = 800;
     const HEIGHT = 600;
@@ -37,6 +34,43 @@
 
     const canvas = document.getElementById("gameCanvas");
     const ctx = canvas.getContext("2d");
+
+    function resizeCanvas() {
+        const aspectRatio = WIDTH / HEIGHT;
+        const padding = 16;
+        const maxWidth = window.innerWidth - padding;
+        const maxHeight = window.innerHeight - padding;
+
+        let displayWidth = maxWidth;
+        let displayHeight = Math.round(displayWidth / aspectRatio);
+
+        if (displayHeight > maxHeight) {
+            displayHeight = maxHeight;
+            displayWidth = Math.round(displayHeight * aspectRatio);
+        }
+
+        // Get the device pixel ratio
+        const dpr = window.devicePixelRatio || 1;
+
+        // Set the internal canvas resolution to match scaled size × DPR
+        canvas.width = displayWidth * dpr;
+        canvas.height = displayHeight * dpr;
+
+        // Set the canvas CSS size (visible size in layout)
+        canvas.style.width = `${displayWidth}px`;
+        canvas.style.height = `${displayHeight}px`;
+
+        // Scale the context to match the DPR
+        ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+        ctx.scale((displayWidth * dpr) / WIDTH, (displayHeight * dpr) / HEIGHT);
+
+        // Optional: make pixel art look sharp
+        ctx.imageSmoothingEnabled = false;
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+    window.addEventListener('orientationchange', resizeCanvas);
+    resizeCanvas();
 
     class Server {
         #socket = undefined;
@@ -73,9 +107,9 @@
                         const transportTime = rtt / 2;
                         const extraTicks = transportTime / TICK_RATE; // add time delay from server to client
                         e.message.ticks += extraTicks;
-                        log.add(`Hello received from server after ${rtt.toFixed(2)} ms`);
-                        log.add(`Local ship ID is ${e.message.id}`);
-                        log.add(`Added ${extraTicks.toFixed(2)} extra ticks for transit time`);
+                        this.#log.add(`Hello received from server after ${rtt.toFixed(2)} ms`);
+                        this.#log.add(`Local ship ID is ${e.message.id}`);
+                        this.#log.add(`Added ${extraTicks.toFixed(2)} extra ticks for transit time`);
                         resolve(e.message);
                     }
 
@@ -136,7 +170,7 @@
             document.addEventListener("keydown", e => {
                 for (let i = Keys.THRUST; i <= Keys.RIGHT; i++) {
                     if (Keys.BINDINGS[i].includes(e.key)) {
-                        this.#keyDownTimes[i] = clock.ticksAt(performance.now());
+                        this.#keyDownTimes[i] = clock.ticksNow();
                         this.#keyUpTimes[i] = Number.MAX_VALUE;
                     }
                 }
@@ -144,7 +178,7 @@
             document.addEventListener("keyup", e => {
                 for (let i = Keys.THRUST; i <= Keys.RIGHT; i++) {
                     if (Keys.BINDINGS[i].includes(e.key)) {
-                        this.#keyUpTimes[i] = clock.ticksAt(performance.now());
+                        this.#keyUpTimes[i] = clock.ticksNow();
                     }
                 }
             });
@@ -184,6 +218,8 @@
         }
 
         draw() {
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, 800, 600);
             for (const arr of this.#stars) {
                 const [x, y, radius] = arr;
                 ctx.beginPath();
@@ -203,6 +239,10 @@
             this.#epochTicks = epochTicks;
         }
 
+        ticksNow() {
+            return this.ticksAt(performance.now());
+        }
+
         ticksAt(timestamp) {
             return this.#epochTicks + Math.floor((timestamp - this.#epochTime) / TICK_RATE);
         }
@@ -215,7 +255,7 @@
         static MAX_ROTATION_VEL = Math.PI / 20;
         static MIN_ROTATION_VEL = 0.005;
         static ROTATION_ACCEL = Math.PI / 80;
-        static DECEL = 0.95;
+        static DECEL = 0.96;
         static THRUST_EFFECT_PERIOD = 200 / TPS;
         static SIZE = 32;
 
@@ -234,12 +274,15 @@
         #lastRightTurnTicks = undefined;
 
         #server = undefined;
+        #tps = undefined;
 
-        constructor(x, y, server, clock) {
+        constructor(x, y, server, clock, tps) {
             this.#x = x;
             this.#y = y;
+            this.#lastUpdateTicks = clock.ticksNow();
             this.#server = server;
             this.#clock = clock;
+            this.#tps = tps;
         }
 
         thrust(ticks) {
@@ -292,6 +335,9 @@
                         lltt: this.#lastLeftTurnTicks,
                         lrtt: this.#lastRightTurnTicks,
                     }
+                }
+                if (this.#tps) {
+                    this.#tps.increment();
                 }
             }
             this.#lastUpdateTicks += elapsed;
@@ -421,6 +467,34 @@
         }
     }
 
+    class Fps {
+        #lastSecond = 0;
+        #lastCount = 0;
+        #curCount = 0;
+
+        constructor() {
+            this.#lastSecond = this.nowSeconds();
+        }
+
+        nowSeconds() {
+            return Math.floor(performance.now() / 1000);
+        }
+
+        increment() {
+            const t = this.nowSeconds();
+            if (t !== this.#lastSecond) {
+                this.#lastSecond = t;
+                this.#lastCount = this.#curCount;
+                this.#curCount = 0;
+            }
+            this.#curCount += 1;
+        }
+
+        fps() {
+            return this.#lastCount;
+        }
+    }
+
     class Log {
         #duration = undefined
         #messages = []
@@ -441,16 +515,47 @@
         }
 
         draw() {
+            ctx.save();
             ctx.font = '16px sans-serif';
+            ctx.textBaseline = 'top';
             ctx.fillStyle = 'white';
             this.#messages.forEach((val, n) => {
-                ctx.fillText(`[${Math.floor(val.t)}] ${val.m}`, 30, 30 * (n + 1));
+                ctx.fillText(`[${Math.floor(val.t)}] ${val.m}`, 30, 25 * (n + 1));
             });
+            ctx.restore();
+        }
+    }
+
+    class Diagnostics {
+        #fps = undefined;
+        #tps = undefined;
+
+        constructor(fps, tps) {
+            this.#fps = fps;
+            this.#tps = tps;
+        }
+
+        draw() {
+            const padding = 16;
+            ctx.save();
+            ctx.font = '16px sans-serif';
+            ctx.textBaseline = 'top';
+            ctx.textAlign = 'right';
+            ctx.fillStyle = 'white';
+            ctx.fillText(`Res: ${canvas.width}x${canvas.height}`, WIDTH - padding, padding);
+            ctx.fillText(`FPS: ${this.#fps.fps()}`, WIDTH - padding, padding + 25);
+            ctx.fillText(`TPS: ${this.#tps.fps()}`, WIDTH - padding, padding + 50);
+            ctx.restore();
         }
     }
 
     class GameLoop {
+        #fps = undefined;
         #objects = []
+
+        constructor(fps) {
+            this.#fps = fps;
+        }
 
         start() {
             requestAnimationFrame(t => this.iteration(t));
@@ -469,6 +574,7 @@
                 obj.draw(timestamp);
             }
             requestAnimationFrame(t => this.iteration(t));
+            this.#fps.increment();
         }
     }
 
@@ -518,17 +624,10 @@
         }
     }
 
-    const starfield = new Starfield(200);
-    const log = new Log(5000);
-    const gameLoop = new GameLoop();
-    gameLoop.start();
-    gameLoop.add(() => {}, () => starfield.draw());
-    gameLoop.add(t => log.update(t), () => log.draw());
-
-    function start(server, nextTick) {
+    function start(gameLoop, log, tps, server, nextTick) {
         const clock = new Clock(nextTick);
         const keys = new Keys(clock);
-        const ship = new Ship(WIDTH / 2, HEIGHT / 2, server, clock);
+        const ship = new Ship(WIDTH / 2, HEIGHT / 2, server, clock, tps);
         const peers = new Peers(clock, log, 5000);
         server.setOnEventFn(e => peers.onEvent(e));
         gameLoop.add(t => ship.update(t, keys), t => ship.draw(t));
@@ -536,12 +635,29 @@
         log.add(`Started clock at ${nextTick} ticks`);
     }
 
-    const server = new Server("ws://localhost:3000/cable", log);
-    server.init().then(e => {
-        const nextTick = Math.ceil(e.ticks);
-        const delay = (nextTick - e.ticks) * TICK_RATE;
-        setTimeout(() => start(server, nextTick), delay); // synchronize clock with server
-    });
+    function init() {
+        const starfield = new Starfield(200);
+        const log = new Log(5000);
+        const fps = new Fps();
+        const tps = new Fps();
+        const gameLoop = new GameLoop(fps);
+        const diagnostics = new Diagnostics(fps, tps);
+        gameLoop.start();
+        gameLoop.add(() => {}, () => starfield.draw());
+        gameLoop.add(() => {}, () => diagnostics.draw());
+        gameLoop.add(t => log.update(t), () => log.draw());
+
+        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+        const host = window.location.host; // includes hostname + port
+        const server = new Server(`${protocol}://${host}/cable`, log);
+        server.init().then(e => {
+            const nextTick = Math.ceil(e.ticks);
+            const delay = (nextTick - e.ticks) * TICK_RATE;
+            setTimeout(() => start(gameLoop, log, tps, server, nextTick), delay); // synchronize clock with server
+        });
+    }
+
+    init();
 </script>
 </body>
 </html>
