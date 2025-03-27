@@ -8,11 +8,19 @@ class GameChannel < ApplicationCable::Channel
   def receive(data)
     case data["type"]
     when "hello"
-      transmit({ type: "hello", ticks: GameState.instance.ticks_elapsed, id: connection.id })
+      gs = GameState.instance
+      x, y = gs.beacon
+      transmit({
+                 type: "hello",
+                 ticks: gs.ticks_elapsed,
+                 id: connection.id,
+                 beacon: { x:, y: } })
     when "event"
-      Rails.logger.info "Received event: #{data}"
       data[:id] = connection.id
       ActionCable.server.broadcast("events", data)
+    when "beacon"
+      x, y = GameState.instance.next_beacon
+      ActionCable.server.broadcast("events", { type: 'beacon', id: connection.id, beacon: { x:, y: } })
     else
       Rails.logger.info "Unknown message type: #{data["type"]}"
     end

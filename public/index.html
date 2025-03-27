@@ -77,6 +77,7 @@
         #log = undefined;
         #id = undefined;
         #onEventFn = undefined;
+        #onBeaconFn = undefined;
 
         constructor(url, log) {
             this.#log = log;
@@ -85,6 +86,10 @@
 
         setOnEventFn(onEventFn) {
             this.#onEventFn = onEventFn;
+        }
+
+        setOnBeaconFn(onBeaconFn) {
+            this.#onBeaconFn = onBeaconFn;
         }
 
         init() {
@@ -118,6 +123,12 @@
                             this.#onEventFn(e.message);
                         }
                     }
+
+                    if (e.message && e.message.type === 'beacon') {
+                        if (this.#onBeaconFn) {
+                            this.#onBeaconFn(e.message);
+                        }
+                    }
                 };
             });
         }
@@ -135,6 +146,10 @@
 
         sendEvent(event) {
             this.send('message', {type: "event", event});
+        }
+
+        sendBeaconHit() {
+            this.send('message', {type: "beacon"});
         }
     }
 
@@ -163,25 +178,79 @@
             ['d', 'ArrowRight']
         ];
 
+        #clock = undefined;
         #keyDownTimes = [Number.MAX_VALUE, Number.MAX_VALUE, Number.MAX_VALUE];
         #keyUpTimes = [0, 0, 0];
+        #activeTouches = new Map();
 
         constructor(clock) {
-            document.addEventListener("keydown", e => {
-                for (let i = Keys.THRUST; i <= Keys.RIGHT; i++) {
-                    if (Keys.BINDINGS[i].includes(e.key)) {
-                        this.#keyDownTimes[i] = clock.ticksNow();
-                        this.#keyUpTimes[i] = Number.MAX_VALUE;
-                    }
+            this.#clock = clock;
+            document.addEventListener("keydown", e => this.handleKeyDown(e));
+            document.addEventListener("keyup", e => this.handleKeyUp(e));
+            window.addEventListener("touchstart", e => this.handleTouchStart(e), { passive: true });
+            window.addEventListener("touchmove", e => this.handleTouchMove(e), { passive: true });
+            window.addEventListener("touchend", e => this.handleTouchEnd(e), { passive: true });
+            window.addEventListener("touchcancel", e => this.handleTouchEnd(e), { passive: true });
+        }
+
+        storeKeyDown(key) {
+            this.#keyDownTimes[key] = this.#clock.ticksNow();
+            this.#keyUpTimes[key] = Number.MAX_VALUE;
+        }
+
+        storeKeyUp(key) {
+            this.#keyUpTimes[key] = this.#clock.ticksNow();
+        }
+
+        handleKeyDown(e) {
+            for (let i = Keys.THRUST; i <= Keys.RIGHT; i++) {
+                if (Keys.BINDINGS[i].includes(e.key)) {
+                    this.storeKeyDown(i);
                 }
-            });
-            document.addEventListener("keyup", e => {
-                for (let i = Keys.THRUST; i <= Keys.RIGHT; i++) {
-                    if (Keys.BINDINGS[i].includes(e.key)) {
-                        this.#keyUpTimes[i] = clock.ticksNow();
-                    }
+            }
+        }
+
+        handleKeyUp(e) {
+            for (let i = Keys.THRUST; i <= Keys.RIGHT; i++) {
+                if (Keys.BINDINGS[i].includes(e.key)) {
+                    this.storeKeyUp(i);
                 }
-            });
+            }
+        }
+
+        getZone(x) {
+            const w = window.innerWidth;
+            if (x < w / 3) return Keys.LEFT;
+            if (x < (2 * w) / 3) return Keys.THRUST;
+            return Keys.RIGHT;
+        }
+
+        handleTouchStart(event) {
+            for (const touch of event.changedTouches) {
+                const zone = this.getZone(touch.clientX);
+                this.#activeTouches.set(touch.identifier, zone);
+                this.storeKeyDown(zone);
+            }
+        }
+
+        handleTouchMove(event) {
+            for (const touch of event.changedTouches) {
+                const oldZone = this.#activeTouches.get(touch.identifier);
+                const newZone = this.getZone(touch.clientX);
+                if (newZone !== oldZone) {
+                    this.#activeTouches.set(touch.identifier, newZone);
+                    this.storeKeyUp(oldZone);
+                    this.storeKeyDown(newZone);
+                }
+            }
+        }
+
+        handleTouchEnd(event) {
+            for (const touch of event.changedTouches) {
+                const zone = this.#activeTouches.get(touch.identifier);
+                this.#activeTouches.delete(touch.identifier);
+                this.storeKeyUp(zone);
+            }
         }
 
         inputTimeRange(type) {
@@ -275,14 +344,16 @@
 
         #server = undefined;
         #tps = undefined;
+        #beacon = undefined;
 
-        constructor(x, y, server, clock, tps) {
+        constructor(x, y, server, clock, tps, beacon) {
             this.#x = x;
             this.#y = y;
             this.#lastUpdateTicks = clock.ticksNow();
             this.#server = server;
             this.#clock = clock;
             this.#tps = tps;
+            this.#beacon = beacon;
         }
 
         thrust(ticks) {
@@ -338,6 +409,11 @@
                 }
                 if (this.#tps) {
                     this.#tps.increment();
+                }
+                if (this.#beacon.distance(this.#x, this.#y) < 25) {
+                    if (this.#beacon.hit()) {
+                        this.#server.sendBeaconHit();
+                    }
                 }
             }
             this.#lastUpdateTicks += elapsed;
@@ -624,12 +700,100 @@
         }
     }
 
-    function start(gameLoop, log, tps, server, nextTick) {
+    class Beacon {
+        #clock = undefined;
+        #x = undefined;
+        #y = undefined;
+        #hit = undefined;
+
+        constructor(clock, x, y) {
+            this.#clock = clock;
+            this.#x = x;
+            this.#y = y;
+        }
+
+        onEvent(e) {
+            this.reset(e.beacon.x, e.beacon.y);
+        }
+
+        reset(x, y) {
+            this.#x = x;
+            this.#y = y;
+            this.#hit = false;
+        }
+
+        hit() {
+            if (!this.#hit) {
+                this.#hit = true;
+                return true;
+            }
+            return false;
+        }
+
+        distance(x, y) {
+            const dx = x - this.#x;
+            const dy = y - this.#y;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        draw(timestamp) {
+            if (this.#hit) {
+                return;
+            }
+
+            const ticks = this.#clock.ticksAt(timestamp);
+            const x = this.#x;
+            const y = this.#y;
+            ctx.save();
+            ctx.translate(x, y);
+
+            // 1. Pulsing outer glow
+            const pulse = 0.5 + 0.5 * Math.sin(ticks * 0.1);
+            const outerRadius = 20 + pulse * 10;
+            ctx.beginPath();
+            ctx.arc(0, 0, outerRadius, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(255, 255, 100, ${0.15 + 0.15 * pulse})`;
+            ctx.fill();
+
+            // 2. Rotating halo ring
+            ctx.save();
+            ctx.rotate(ticks * 0.05);
+            ctx.beginPath();
+            ctx.arc(0, 0, 18, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255, 255, 150, 0.3)`;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 6]);
+            ctx.stroke();
+            ctx.restore();
+
+            // 3. Expanding pulse ring (like a sonar blip)
+            const ringRadius = (ticks % 60) * 1.5;
+            const ringAlpha = 1 - (ticks % 60) / 60;
+            ctx.beginPath();
+            ctx.arc(0, 0, ringRadius, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255, 255, 0, ${ringAlpha * 0.3})`;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // 4. Solid core
+            ctx.beginPath();
+            ctx.arc(0, 0, 8 + 2 * pulse, 0, Math.PI * 2);
+            ctx.fillStyle = 'yellow';
+            ctx.fill();
+
+            ctx.restore();
+        }
+    }
+
+    function start(gameLoop, log, tps, server, nextTick, beaconCoords) {
         const clock = new Clock(nextTick);
         const keys = new Keys(clock);
-        const ship = new Ship(WIDTH / 2, HEIGHT / 2, server, clock, tps);
+        const beacon = new Beacon(clock, beaconCoords.x, beaconCoords.y);
+        const ship = new Ship(WIDTH / 2, HEIGHT / 2, server, clock, tps, beacon);
         const peers = new Peers(clock, log, 5000);
         server.setOnEventFn(e => peers.onEvent(e));
+        server.setOnBeaconFn(e => beacon.onEvent(e));
+        gameLoop.add(() => {}, t => beacon.draw(t));
         gameLoop.add(t => ship.update(t, keys), t => ship.draw(t));
         gameLoop.add(t => peers.update(t), t => peers.draw(t));
         log.add(`Started clock at ${nextTick} ticks`);
@@ -653,7 +817,7 @@
         server.init().then(e => {
             const nextTick = Math.ceil(e.ticks);
             const delay = (nextTick - e.ticks) * TICK_RATE;
-            setTimeout(() => start(gameLoop, log, tps, server, nextTick), delay); // synchronize clock with server
+            setTimeout(() => start(gameLoop, log, tps, server, nextTick, e.beacon), delay); // synchronize clock with server
         });
     }
 
