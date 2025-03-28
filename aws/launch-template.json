@@ -1,0 +1,8 @@
+{
+  "ImageId": "ami-02199054a59591d93",
+  "InstanceType": "t4g.micro",
+  "UserData": "IyEvYmluL2Jhc2gKZWNobyAiRUNTX0NMVVNURVI9c3BhY2Utc2xhbG9tLWNsdXN0ZXIiID4+IC9ldGMvZWNzL2Vjcy5jb25maWcK",
+  "IamInstanceProfile": {
+    "Name": "ecsInstanceRole"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "Comment": "Route53 record for Space Slalom",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "spaceslalom.barlasgarden.com",
+        "Type": "A",
+        "TTL": 300,
+        "ResourceRecords": [
+          { "Value": "52.53.148.242" }
+        ]
+      }
+    }
+  ]
+}
