@@ -20,7 +20,10 @@ class GameChannel < ApplicationCable::Channel
       ActionCable.server.broadcast("events", data)
     when "beacon"
       x, y = GameState.instance.next_beacon
-      ActionCable.server.broadcast("events", { type: 'beacon', id: connection.id, beacon: { x:, y: } })
+      ActionCable.server.broadcast("events", {
+        type: 'beacon',
+        id: connection.id,
+        beacon: { x:, y: } })
     else
       Rails.logger.info "Unknown message type: #{data["type"]}"
     end
