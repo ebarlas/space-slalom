@@ -25,7 +25,13 @@ Mobile:
 
 ## Project
 
-Space Slalom is a Ruby on Rails project created with the following:
+The relevant code snippets for Space Slalom are:
+
+- [public/index.html](public/index.html) - Game client
+- [app/channels/game_channel.rb](app/channels/game_channel.rb) - Server WebSocket handling
+- [app/channels/game_state.rb](app/channels/game_state.rb) - Server game state
+
+Space Slalom is a Ruby on Rails project initially created with the following:
 
 ```
 rails new spacewars \
